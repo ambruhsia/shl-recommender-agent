@@ -107,8 +107,13 @@ class CatalogEngine:
         else:
             self._index = None
 
+        # Pre-load sentence-transformers model now so first /chat request isn't slow.
+        # Without this, the model downloads on first _embed() call with no timeout.
+        self._ensure_model()
+
         print(f"[CatalogEngine] Loaded {len(self._catalog)} entries. "
-              f"FAISS: {'ready' if self._index is not None else 'fallback'}.")
+              f"FAISS: {'ready' if self._index is not None else 'fallback'}. "
+              f"Model: ready.")
 
     # ------------------------------------------------------------------
     # Private helpers

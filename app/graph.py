@@ -312,16 +312,22 @@ def make_agent_node(engine: CatalogEngine):
                         parts=[types.Part.from_text(text=m["content"])],
                     )
                 )
-            response = client.models.generate_content(
-                model=_model,
-                contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    max_output_tokens=1500,
-                    temperature=_temp,
-                ),
+            import concurrent.futures
+            _config = types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=1500,
+                temperature=_temp,
             )
-            raw_text = response.text or ""
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                _future = _pool.submit(
+                    client.models.generate_content,
+                    model=_model, contents=contents, config=_config,
+                )
+                try:
+                    response = _future.result(timeout=45)
+                except concurrent.futures.TimeoutError:
+                    response = None
+            raw_text = (response.text if response else "") or ""
 
         parsed = extract_json(raw_text)
         return {**state, "response": parsed}
