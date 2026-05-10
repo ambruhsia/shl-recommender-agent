@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional, Set
 
 CATALOG_PATH = Path(__file__).parent.parent / "data" / "catalog.json"
 VECTOR_STORE_PATH = Path(__file__).parent.parent / "data" / "vector_store"
+ST_MODEL_PATH = Path(__file__).parent.parent / "data" / "st_model"
 
 _SENTINEL = object()
 
@@ -107,13 +108,8 @@ class CatalogEngine:
         else:
             self._index = None
 
-        # Pre-load sentence-transformers model now so first /chat request isn't slow.
-        # Without this, the model downloads on first _embed() call with no timeout.
-        self._ensure_model()
-
         print(f"[CatalogEngine] Loaded {len(self._catalog)} entries. "
-              f"FAISS: {'ready' if self._index is not None else 'fallback'}. "
-              f"Model: ready.")
+              f"FAISS: {'ready' if self._index is not None else 'fallback'}.")
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -122,7 +118,9 @@ class CatalogEngine:
     def _ensure_model(self) -> None:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            # Use locally-saved model from build step; fall back to HuggingFace download
+            model_source = str(ST_MODEL_PATH) if ST_MODEL_PATH.exists() else "all-MiniLM-L6-v2"
+            self._model = SentenceTransformer(model_source)
 
     def _embed(self, text: str) -> np.ndarray:
         self._ensure_model()

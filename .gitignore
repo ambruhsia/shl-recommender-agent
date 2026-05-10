@@ -7,3 +7,4 @@ __pycache__/
 .claude/
 logs/
 data/vector_store/
+data/st_model/

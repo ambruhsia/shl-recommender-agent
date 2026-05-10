@@ -66,6 +66,11 @@ def main() -> None:
     print(f"Saved to: {index_path}")
     print(f"ID map saved to: {ids_path}")
 
+    # Save model locally so runtime loads from disk, not from HuggingFace
+    st_model_path = REPO_ROOT / "data" / "st_model"
+    model.save(str(st_model_path))
+    print(f"Sentence-transformer model saved to: {st_model_path}")
+
 
 if __name__ == "__main__":
     main()
