@@ -1,0 +1,13 @@
+.venv/
+.env
+.git/
+.claude/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+logs/
+data/vector_store/
+data/st_model/
+runtime.txt
