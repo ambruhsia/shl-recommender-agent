@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import concurrent.futures
 from typing import TypedDict, List, Dict, Any
 
 from dotenv import load_dotenv
@@ -30,31 +31,20 @@ class AgentState(TypedDict):
 # Directive 10: Robust JSON Extraction
 # ---------------------------------------------------------------------------
 
-# Ordered extraction strategies:
-# Group 1 — fenced ```json ... ``` blocks (non-greedy inner match)
-# Group 2 — bare outermost {...} block (greedy to capture full nested object)
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _JSON_BARE_RE  = re.compile(r"(\{.*\})", re.DOTALL)
 
 
 def extract_json(text: str) -> Dict[str, Any]:
-    """
-    Directive 10: three-level robust JSON extraction.
-    1. Direct json.loads                     → ideal path
-    2. Regex: fenced block, then bare block  → handles preamble/markdown
-    3. Safe fallback dict                    → prevents 500 errors
-    """
     if not isinstance(text, str):
         text = str(text)
     text = text.strip()
 
-    # Level 1
     try:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Level 2a — fenced block
     m = _JSON_FENCE_RE.search(text)
     if m:
         try:
@@ -62,7 +52,6 @@ def extract_json(text: str) -> Dict[str, Any]:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Level 2b — bare {...} block
     m = _JSON_BARE_RE.search(text)
     if m:
         try:
@@ -70,7 +59,6 @@ def extract_json(text: str) -> Dict[str, Any]:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # Level 3 — safe fallback (never raises)
     return {
         "reply": (text[:500] if text else "I encountered an error. Please try again."),
         "recommendations": [],
@@ -83,11 +71,6 @@ def extract_json(text: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def hydrate_shortlist(messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """
-    Directive 9: look back through ALL assistant turns and return the most
-    recent non-empty recommendations list as the current shortlist.
-    This ensures turn-5 still remembers the tech stack set in turn-1.
-    """
     for msg in reversed(messages):
         if msg.get("role") == "assistant":
             parsed = extract_json(msg.get("content", ""))
@@ -98,7 +81,6 @@ def hydrate_shortlist(messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
 
 
 def build_full_user_query(messages: List[Dict[str, str]]) -> str:
-    """Directive 9: concatenate ALL user messages to preserve full context."""
     parts = [m["content"] for m in messages if m.get("role") == "user"]
     return " ".join(parts)
 
@@ -112,9 +94,6 @@ You are an SHL Assessment Advisor. You help hiring managers and recruiters selec
 the right SHL individual assessment solutions from the official product catalog. \
 ONLY recommend assessments that exist in the catalog — never invent product names, \
 URLs, or test types. Every name and URL you output must appear verbatim in the catalog.
-
-## COMPLETE SHL CATALOG
-{catalog_summary}
 
 ## RETRIEVED CANDIDATES FOR THIS QUERY
 {candidates}
@@ -153,7 +132,7 @@ Only ask a clarifying question if BOTH job role/level AND assessment purpose are
 
 ## DIRECTIVE 5 — COMPARE LOGIC (grounded in catalog descriptions)
 When the user asks to compare or explain differences between two assessments, use ONLY
-the DESCRIPTION fields from the RETRIEVED CANDIDATES or COMPLETE CATALOG above.
+the DESCRIPTION fields from the RETRIEVED CANDIDATES above.
 Do not use your own general knowledge. Quote or closely paraphrase the catalog data.
 Example: "DSI vs Safety & Dependability 8.0" → explain using their catalog descriptions.
 
@@ -172,8 +151,8 @@ For senior / executive / leadership roles (Director, CXO, VP, Head of, Senior IC
   let me know if you'd like to skip it."
 
 ## DIRECTIVE 8 — URL/NAME INTEGRITY
-Every name and URL in your output MUST match the catalog exactly. Do not paraphrase, shorten,
-or invent. If you are unsure of the exact name, check the COMPLETE CATALOG list above.
+Every name and URL in your output MUST match the RETRIEVED CANDIDATES exactly.
+Do not paraphrase, shorten, or invent names. If unsure, omit rather than guess.
 Hallucinated URLs result in automatic score of zero.
 
 ## WHAT TO REFUSE
@@ -205,7 +184,7 @@ Output ONLY a single valid JSON object. No markdown fences. No text before or af
 - "reply": non-empty string
 - "recommendations": array ([] if not yet recommending or if clarifying)
 - "end_of_conversation": boolean (true when user confirms final list, or turn_count >= 8)
-- Max 10 items; use EXACT names and URLs from the catalog
+- Max 10 items; use EXACT names and URLs from the retrieved candidates above
 """
 
 
@@ -217,17 +196,13 @@ def make_retrieve_node(engine: CatalogEngine):
     def retrieve_node(state: AgentState) -> AgentState:
         messages = state["messages"]
 
-        # Directive 9: use FULL conversation history for query (not just last 3 turns)
         full_query = build_full_user_query(messages)
 
-        # Directives 2 & 3: detect seniority and frameworks from full history
         seniority = detect_seniority(full_query)
         frameworks = extract_frameworks(full_query)
 
-        # Directive 1: hydrate shortlist from previous assistant messages
         shortlist = hydrate_shortlist(messages)
 
-        # Boosted retrieval (directives 2 & 3)
         candidates = engine.search_boosted(
             query=full_query,
             seniority=seniority,
@@ -247,7 +222,6 @@ def make_retrieve_node(engine: CatalogEngine):
 
 def make_agent_node(engine: CatalogEngine):
     def agent_node(state: AgentState) -> AgentState:
-        # Directive 1: build shortlist section for system prompt
         shortlist = state.get("shortlist", [])
         if shortlist:
             items_text = "\n".join(
@@ -262,7 +236,6 @@ def make_agent_node(engine: CatalogEngine):
             shortlist_section = ""
 
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
-            catalog_summary=engine.catalog_summary_text(),
             candidates=engine.format_candidates(state["candidates"]),
             shortlist_section=shortlist_section,
             seniority_flag=str(state.get("seniority_bias", False)),
@@ -312,7 +285,6 @@ def make_agent_node(engine: CatalogEngine):
                         parts=[types.Part.from_text(text=m["content"])],
                     )
                 )
-            import concurrent.futures
             _config = types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 max_output_tokens=1500,
@@ -343,7 +315,6 @@ def make_format_node(engine: CatalogEngine):
         if not isinstance(recs_raw, list):
             recs_raw = []
 
-        # Directive 8: verify each recommendation against catalog; correct or drop
         verified: List[Recommendation] = []
         seen_names: set = set()
 
@@ -357,12 +328,11 @@ def make_format_node(engine: CatalogEngine):
 
             catalog_item = engine.verify_item(name, url)
             if catalog_item is None:
-                # Hallucinated item — drop silently
                 continue
 
             canonical_name = catalog_item["name"]
             if canonical_name in seen_names:
-                continue  # deduplicate
+                continue
             seen_names.add(canonical_name)
 
             verified.append(Recommendation(
@@ -371,10 +341,8 @@ def make_format_node(engine: CatalogEngine):
                 test_type=catalog_item["test_type"],
             ))
 
-        # Directive 6: prune to max 10 (ChatResponse validator also enforces this)
         verified = verified[:10]
 
-        # Directive: force end_of_conversation at turn limit
         eoc = bool(raw.get("end_of_conversation", False))
         if state["turn_count"] >= 8:
             eoc = True
@@ -395,14 +363,11 @@ def make_format_node(engine: CatalogEngine):
 # ---------------------------------------------------------------------------
 
 def build_graph(engine: CatalogEngine):
-    """
-    Flow: START → retrieve_node → agent_node → format_node → END
-    """
     graph = StateGraph(AgentState)
 
     graph.add_node("retrieve_node", make_retrieve_node(engine))
     graph.add_node("agent_node",    make_agent_node(engine))
-    graph.add_node("format_node",   make_format_node(engine))   # engine passed for verification
+    graph.add_node("format_node",   make_format_node(engine))
 
     graph.add_edge(START, "retrieve_node")
     graph.add_edge("retrieve_node", "agent_node")
