@@ -3,42 +3,47 @@ name: Deploy FastAPI to AWS EC2
 on:
   push:
     branches:
-      - main  # This runs the automation script every time you run 'git push' to your main branch
+      - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-    # Step 1: Grabs a copy of your codebase
     - name: Checkout Repository Code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4.2.2
 
-    # Step 2: Remotely logs into your EC2 instance and runs the update scripts
     - name: Execute Remote SSH Commands to Deploy
-      uses: appleboy/ssh-action@v1.0.3
+      uses: appleboy/ssh-action@v1.2.0
       with:
         host: ${{ secrets.EC2_HOST }}
         username: ${{ secrets.EC2_USERNAME }}
         key: ${{ secrets.EC2_SSH_KEY }}
         port: 22
         script: |
-          # 1. Check if the project folder exists on EC2. If not, clone it. If yes, pull changes.
+          set -e
+
+          # Clone on first deploy; pull on subsequent deploys
           if [ ! -d "fastapi-ml-app" ]; then
-            git clone https://github.com{{ github.repository }}.git fastapi-ml-app
-            cd fastapi-ml-app
+            git clone https://github.com/${{ github.repository }}.git fastapi-ml-app
           else
-            cd fastapi-ml-app
-            git reset --hard HEAD
-            git pull origin main
+            git -C fastapi-ml-app fetch origin main
+            git -C fastapi-ml-app reset --hard origin/main
           fi
 
-          # 2. Build the new Docker production image from the repository Dockerfile
+          cd fastapi-ml-app
+
+          # Build image (Dockerfile bakes FAISS index + ST model at build time)
           docker build -t fastapi-ml-app .
 
-          # 3. Stop and delete the old container to free up port 80 allocation
+          # Rotate container — stop/rm are allowed to fail if container doesn't exist yet
           docker stop ml-api || true
-          docker rm ml-api || true
+          docker rm   ml-api || true
 
-          # 4. Start the updated app container with an automatic restart crash policy
-          docker run -d --name ml-api -p 80:80 --restart always fastapi-ml-app
+          # Dockerfile exposes 10000; map host port 80 → container port 10000
+          docker run -d \
+            --name ml-api \
+            -p 80:10000 \
+            --restart always \
+            -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
+            fastapi-ml-app
