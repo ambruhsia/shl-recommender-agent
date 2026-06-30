@@ -8,7 +8,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import numpy as np
 import faiss
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 
 CATALOG_PATH = Path(__file__).parent.parent / "data" / "catalog.json"
@@ -18,17 +18,46 @@ ST_MODEL_PATH = Path(__file__).parent.parent / "data" / "st_model"
 _SENTINEL = object()
 
 # ---------------------------------------------------------------------------
-# Directive 2 & 3: Seniority detection + Framework → Catalog name mapping
+# Seniority detection + job level mapping
 # ---------------------------------------------------------------------------
 
 _SENIORITY_KEYWORDS: Set[str] = {
     "senior", "lead", "principal", "staff", "director", "cxo", "vp", "c-suite",
     "c-level", "expert", "advanced", "experienced", "10+", "15+", "20+",
-    "head of", "vp of", "chief", "executive",
+    "head of", "vp of", "chief", "executive", "manager", "supervisor",
+    "front line manager",
 }
 
-# Maps lowercase technology keyword → list of exact catalog product names (priority order)
-# Key insight: specific framework names → exact test names from the real catalog
+# Maps user-facing seniority language → SHL catalog job_level values
+_JOB_LEVEL_MAP: Dict[str, str] = {
+    "entry":        "Entry-Level",
+    "entry-level":  "Entry-Level",
+    "junior":       "Entry-Level",
+    "intern":       "Entry-Level",
+    "graduate":     "Graduate",
+    "grad":         "Graduate",
+    "mid":          "Mid-Professional",
+    "mid-level":    "Mid-Professional",
+    "professional": "Mid-Professional",
+    "supervisor":   "Supervisor",
+    "manager":      "Manager",
+    "front line":   "Front Line Manager",
+    "frontline":    "Front Line Manager",
+    "director":     "Director",
+    "executive":    "Executive",
+    "cxo":          "Executive",
+    "vp":           "Executive",
+    "c-suite":      "Executive",
+    "senior":       "Professional Individual Contributor",
+    "lead":         "Professional Individual Contributor",
+    "principal":    "Professional Individual Contributor",
+    "staff":        "Professional Individual Contributor",
+}
+
+# ---------------------------------------------------------------------------
+# Framework → Catalog name mapping
+# ---------------------------------------------------------------------------
+
 FRAMEWORK_CATALOG_MAP: Dict[str, List[str]] = {
     "java":          ["Core Java (Advanced Level) (New)", "Core Java (Entry Level) (New)"],
     "spring":        ["Spring (New)"],
@@ -57,7 +86,6 @@ FRAMEWORK_CATALOG_MAP: Dict[str, List[str]] = {
     "salesforce":    ["Salesforce (New)"],
     "power bi":      ["Power BI (New)"],
     "tableau":       ["Tableau (New)"],
-    # no Rust-specific test exists — handle separately in graph.py
 }
 
 
@@ -65,6 +93,16 @@ def detect_seniority(text: str) -> bool:
     """Return True if any seniority signal is found in text."""
     text_lower = text.lower()
     return any(kw in text_lower for kw in _SENIORITY_KEYWORDS)
+
+
+def detect_job_level(text: str) -> Optional[str]:
+    """Return the SHL catalog job_level string most closely matching the user's query, or None."""
+    text_lower = text.lower()
+    # Longest-match first to avoid "manager" matching "front line manager" substrings
+    for kw in sorted(_JOB_LEVEL_MAP, key=len, reverse=True):
+        if kw in text_lower:
+            return _JOB_LEVEL_MAP[kw]
+    return None
 
 
 def extract_frameworks(text: str) -> List[str]:
@@ -75,6 +113,15 @@ def extract_frameworks(text: str) -> List[str]:
         if kw in text_lower and kw not in found:
             found.append(kw)
     return found
+
+
+def clean_duration(raw: str) -> str:
+    """Normalise duration strings — return 'Variable' for em-dash/zero/unknown values."""
+    if not raw or raw.strip() in ("", "-", "—", "0 minutes", "0", "?"):
+        return "Variable"
+    # Strip replacement character that appears when scraper hit an em-dash
+    cleaned = raw.replace("�", "").strip()
+    return cleaned if cleaned else "Variable"
 
 
 class CatalogEngine:
@@ -88,7 +135,7 @@ class CatalogEngine:
         self._index: Any = _SENTINEL
         self._id_map: List[str] = []
         self._name_map: Dict[str, Dict] = {}
-        self._url_map: Dict[str, Dict] = {}      # url (normalised) → entry
+        self._url_map: Dict[str, Dict] = {}
         self._model: Any = None
 
     # ------------------------------------------------------------------
@@ -96,12 +143,24 @@ class CatalogEngine:
     # ------------------------------------------------------------------
 
     def load(self) -> None:
-        self._catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+        raw_catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+
+        # PRD scope: only Individual Test Solutions are recommendable. SHL labels
+        # its Pre-packaged Job Solutions with a trailing " Solution" in the name
+        # (e.g. "Entry Level Sales Solution"); these bundle multiple test types
+        # and are strictly out of scope. Filter at load time so the raw scraped
+        # catalog.json stays intact but these are never retrievable/verifiable.
+        self._catalog = [
+            e for e in raw_catalog
+            if not e["name"].strip().endswith(" Solution")
+        ]
+        dropped = len(raw_catalog) - len(self._catalog)
+
         self._name_map = {e["name"]: e for e in self._catalog}
         self._url_map = {e["url"].rstrip("/"): e for e in self._catalog}
 
         index_file = VECTOR_STORE_PATH / "catalog.index"
-        ids_file = VECTOR_STORE_PATH / "index_ids.json"
+        ids_file   = VECTOR_STORE_PATH / "index_ids.json"
 
         if index_file.exists() and ids_file.exists():
             self._index = faiss.read_index(str(index_file))
@@ -109,7 +168,8 @@ class CatalogEngine:
         else:
             self._index = None
 
-        print(f"[CatalogEngine] Loaded {len(self._catalog)} entries. "
+        print(f"[CatalogEngine] Loaded {len(self._catalog)} entries "
+              f"({dropped} pre-packaged Job Solutions filtered out). "
               f"FAISS: {'ready' if self._index is not None else 'fallback'}.")
 
     # ------------------------------------------------------------------
@@ -119,7 +179,6 @@ class CatalogEngine:
     def _ensure_model(self) -> None:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
-            # Use locally-saved model from build step; fall back to HuggingFace download
             model_source = str(ST_MODEL_PATH) if ST_MODEL_PATH.exists() else "all-MiniLM-L6-v2"
             self._model = SentenceTransformer(model_source)
 
@@ -132,49 +191,39 @@ class CatalogEngine:
 
     def _keyword_search(self, query: str, k: int) -> List[Dict[str, Any]]:
         tokens = set(re.sub(r"[^a-z0-9 ]", " ", query.lower()).split())
+        tokens = {t for t in tokens if len(t) > 2}  # skip stopword-length tokens
         scored = []
         for entry in self._catalog:
             blob = (
                 entry["name"] + " " +
                 entry.get("description", "") + " " +
-                " ".join(entry.get("keys", []))
+                " ".join(entry.get("keys", [])) + " " +
+                " ".join(entry.get("job_levels", []))
             ).lower()
             score = sum(1 for t in tokens if t in blob)
             scored.append((score, entry))
         scored.sort(key=lambda x: -x[0])
         top = [e for s, e in scored[:k] if s > 0]
-        return top if top else self._catalog[:k]
+        return top if top else []
 
     # ------------------------------------------------------------------
-    # Directive 8: URL/Name verification
+    # URL/Name verification
     # ------------------------------------------------------------------
 
     def verify_item(self, name: str, url: str) -> Optional[Dict[str, Any]]:
-        """
-        Cross-reference a recommendation against the catalog.
-        Priority order:
-          1. Exact name match
-          2. Case-insensitive name match
-          3. URL match (normalised)
-          4. Partial name containment (longest match wins)
-        Returns the canonical catalog entry, or None if hallucinated.
-        """
-        # 1. Exact name
+        """Cross-reference a recommendation against the catalog."""
         if name in self._name_map:
             return self._name_map[name]
 
-        # 2. Case-insensitive name
         name_lower = name.lower()
         for catalog_name, entry in self._name_map.items():
             if catalog_name.lower() == name_lower:
                 return entry
 
-        # 3. URL match
         url_norm = url.rstrip("/")
         if url_norm in self._url_map:
             return self._url_map[url_norm]
 
-        # 4. Partial name containment — pick the catalog entry whose name is most similar
         candidates = []
         for catalog_name, entry in self._name_map.items():
             cn_lower = catalog_name.lower()
@@ -182,12 +231,12 @@ class CatalogEngine:
                 candidates.append((len(cn_lower), entry))
         if candidates:
             candidates.sort(key=lambda x: x[0])
-            return candidates[0][1]  # shortest (most specific) match
+            return candidates[0][1]
 
-        return None  # hallucinated — will be dropped
+        return None
 
     # ------------------------------------------------------------------
-    # Directive 2 & 3: Boosted search
+    # Boosted search with hybrid retrieval + job_levels awareness
     # ------------------------------------------------------------------
 
     def search_boosted(
@@ -195,26 +244,58 @@ class CatalogEngine:
         query: str,
         seniority: bool = False,
         frameworks: Optional[List[str]] = None,
-        k: int = 15,
+        job_level: Optional[str] = None,
+        k: int = 20,
     ) -> List[Dict[str, Any]]:
         """
-        Semantic search with two recall-boosting layers:
-        - Directive 2: if seniority=True, promote "Advanced Level" items to the front
-        - Directive 3: for each detected framework, pin the exact named test at position 0
-        Returns up to k items, deduplicated.
+        Hybrid semantic + keyword search with three promotion layers:
+        - job_level boost: items whose job_levels include the detected level float up
+        - seniority boost: "Advanced Level" items promoted when senior signals present
+        - framework pinning: exact framework-named tests locked at position 0
+        Returns up to k deduplicated items.
         """
-        # Fetch a larger pool so we have items to promote from
-        pool_size = min(k * 2, self._index.ntotal if self._index else len(self._catalog))
-        base_results = self._semantic_search(query, pool_size)
+        pool_size = min(k * 4, self._index.ntotal if self._index else len(self._catalog))
 
-        # Layer 1 — Directive 2: seniority bias
+        # Hybrid: semantic + keyword merged via score fusion
+        semantic = self._semantic_search(query, pool_size)
+        keyword  = self._keyword_search(query, pool_size // 2)
+
+        score_map: Dict[str, float] = {}
+        item_map:  Dict[str, Dict]  = {}
+
+        for rank, item in enumerate(semantic):
+            score_map[item["name"]] = 1.0 - rank / max(len(semantic), 1)
+            item_map[item["name"]]  = item
+
+        keyword_names = {item["name"] for item in keyword}
+        for name in list(score_map):
+            if name in keyword_names:
+                score_map[name] += 0.15   # hybrid co-occurrence bonus
+
+        for rank, item in enumerate(keyword):
+            if item["name"] not in score_map:
+                score_map[item["name"]] = max(0.3 - rank * 0.01, 0.05)
+                item_map[item["name"]]  = item
+
+        # Layer 0: job_level boost — items explicitly targeting the detected level
+        if job_level:
+            for name, item in item_map.items():
+                if job_level in item.get("job_levels", []):
+                    score_map[name] += 0.20
+
+        base_results = [
+            item_map[name]
+            for name in sorted(score_map, key=lambda n: -score_map[n])
+        ]
+
+        # Layer 1: seniority → prefer "Advanced Level" tests
         if seniority:
             advanced = [r for r in base_results
                         if re.search(r"advanced level|senior", r["name"], re.I)]
-            others = [r for r in base_results if r not in advanced]
+            others   = [r for r in base_results if r not in advanced]
             base_results = advanced + others
 
-        # Layer 2 — Directive 3: pin exact framework tests at the front
+        # Layer 2: pin exact framework tests at the front
         pinned: List[Dict[str, Any]] = []
         if frameworks:
             seen_pinned: Set[str] = set()
@@ -225,7 +306,6 @@ class CatalogEngine:
                         pinned.append(item)
                         seen_pinned.add(item["name"])
 
-        # Merge: pinned first, then semantic results, deduplicated
         merged: List[Dict[str, Any]] = []
         seen_names: Set[str] = set()
         for item in pinned + base_results:
@@ -253,10 +333,10 @@ class CatalogEngine:
         return results
 
     # ------------------------------------------------------------------
-    # Public API (original search kept for compatibility)
+    # Public API
     # ------------------------------------------------------------------
 
-    def search(self, query: str, k: int = 15) -> List[Dict[str, Any]]:
+    def search(self, query: str, k: int = 20) -> List[Dict[str, Any]]:
         return self._semantic_search(query, k)
 
     def get_by_name(self, name: str) -> Optional[Dict[str, Any]]:
@@ -265,27 +345,19 @@ class CatalogEngine:
     def get_all(self) -> List[Dict[str, Any]]:
         return list(self._catalog)
 
-    def catalog_summary_text(self) -> str:
-        lines = []
-        for e in self._catalog:
-            keys = ", ".join(e.get("keys", []))
-            langs = ", ".join(e.get("languages", [])[:3])
-            lines.append(
-                f"- {e['name']} | Type: {e['test_type']} ({keys}) | "
-                f"Duration: {e.get('duration', '?')} | Lang: {langs}"
-            )
-        return "\n".join(lines)
-
     def format_candidates(self, candidates: List[Dict[str, Any]]) -> str:
         if not candidates:
             return "No catalog entries retrieved for this query."
         lines = []
         for e in candidates:
+            duration = clean_duration(e.get("duration", ""))
+            job_levels = ", ".join(e.get("job_levels", [])) or "All levels"
             lines.append(
                 f"NAME: {e['name']}\n"
                 f"  URL: {e['url']}\n"
                 f"  TYPE: {e['test_type']} | {', '.join(e.get('keys', []))}\n"
-                f"  DURATION: {e.get('duration', '?')}\n"
+                f"  DURATION: {duration}\n"
+                f"  JOB LEVELS: {job_levels}\n"
                 f"  LANGUAGES: {', '.join(e.get('languages', [])[:6])}\n"
                 f"  DESCRIPTION: {e.get('description', '')}"
             )

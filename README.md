@@ -12,7 +12,7 @@ pinned: false
 
 A conversational agent that takes a hiring manager from a vague intent — *"I need to hire a Java developer"* — to a grounded shortlist of SHL assessments through multi-turn dialogue.
 
-**Live API:** `https://shl-recommender-production-e0d9.up.railway.app`
+**Live API:** `https://ambruhsia-shl-recommender.hf.space`
 > The hosted instance may go offline. To run locally with your own API keys, see [Run locally](#run-locally).
 
 ---
@@ -42,7 +42,7 @@ Every response is a structured JSON object. The service stores no session state 
 
 ### `GET /health`
 ```bash
-curl https://shl-recommender-production-e0d9.up.railway.app/health
+curl https://ambruhsia-shl-recommender.hf.space/health
 # {"status":"ok"}
 ```
 
@@ -98,7 +98,7 @@ curl https://shl-recommender-production-e0d9.up.railway.app/health
 | LLM | Gemini 2.5 Flash Lite | Free tier, <5s latency, strong JSON instruction-following |
 | Embeddings | `all-MiniLM-L6-v2` | CPU-only, <100 MB RAM, fast synchronous inference |
 | Vector index | FAISS `IndexFlatIP` | In-process, zero network overhead, no persistence needed |
-| Deployment | Docker on Railway | Locked Python version, model baked into image, no cold-start downloads |
+| Deployment | Docker on Hugging Face Spaces | Locked Python version, model baked into image, no cold-start downloads |
 
 ---
 

@@ -67,6 +67,7 @@ def chat(request: ChatRequest):
         "shortlist": [],
         "seniority_bias": False,
         "detected_frameworks": [],
+        "detected_job_level": None,
         "turn_count": turn_count,
         "response": {},
     }
