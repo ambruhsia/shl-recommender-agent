@@ -44,7 +44,11 @@ def main() -> None:
 
     print("Encoding catalog entries…")
     embeddings = model.encode(
-        texts, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=True
+        texts,
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+        show_progress_bar=True,
+        batch_size=4,  # small batches to stay within 1 GB RAM during Docker build
     )
     embeddings = embeddings.astype(np.float32)
 

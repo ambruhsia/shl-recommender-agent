@@ -1,3 +1,13 @@
+---
+title: SHL Recommender
+emoji: 🔍
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # SHL Assessment Recommender
 
 A conversational agent that takes a hiring manager from a vague intent — *"I need to hire a Java developer"* — to a grounded shortlist of SHL assessments through multi-turn dialogue.
