@@ -7,8 +7,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install dependencies as a separate layer so it's cached unless requirements.txt changes
 COPY requirements.txt .
+
+# Install CPU-only PyTorch before anything else.
+# sentence-transformers depends on torch; without this pin it resolves to the
+# full CUDA variant (~2 GB of GPU libs) which exhausts the EC2 EBS volume.
+# The CPU wheel is ~200 MB and sufficient for inference on a CPU-only instance.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining dependencies (torch is already satisfied, so no GPU libs pulled)
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source and catalog

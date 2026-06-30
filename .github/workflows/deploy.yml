@@ -11,7 +11,7 @@ jobs:
 
     steps:
     - name: Checkout Repository Code
-      uses: actions/checkout@v4.2.2
+      uses: actions/checkout@v4
 
     - name: Execute Remote SSH Commands to Deploy
       uses: appleboy/ssh-action@v1.2.0
@@ -33,12 +33,17 @@ jobs:
 
           cd fastapi-ml-app
 
-          # Build image (Dockerfile bakes FAISS index + ST model at build time)
-          docker build -t fastapi-ml-app .
-
-          # Rotate container — stop/rm are allowed to fail if container doesn't exist yet
+          # Stop and remove the running container first so the old image is unused
           docker stop ml-api || true
           docker rm   ml-api || true
+
+          # Remove the previous build image and any dangling layers to reclaim disk
+          # before the new build downloads ~1 GB of packages
+          docker rmi fastapi-ml-app || true
+          docker image prune -f
+
+          # Build image (Dockerfile bakes FAISS index + ST model at build time)
+          docker build -t fastapi-ml-app .
 
           # Dockerfile exposes 10000; map host port 80 → container port 10000
           docker run -d \
