@@ -10,6 +10,7 @@ import faiss
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set
 
+
 CATALOG_PATH = Path(__file__).parent.parent / "data" / "catalog.json"
 VECTOR_STORE_PATH = Path(__file__).parent.parent / "data" / "vector_store"
 ST_MODEL_PATH = Path(__file__).parent.parent / "data" / "st_model"

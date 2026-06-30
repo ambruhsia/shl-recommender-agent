@@ -3,7 +3,7 @@ uvicorn[standard]==0.30.0
 pydantic==2.9.0
 python-dotenv==1.0.1
 google-genai>=1.0.0
-openai>=1.0.0
+openai>=1.55.0
 langchain-core==0.3.15
 langgraph==0.2.50
 faiss-cpu>=1.12.0

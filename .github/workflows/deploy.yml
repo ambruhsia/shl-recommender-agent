@@ -1,0 +1,44 @@
+name: Deploy FastAPI to AWS EC2
+
+on:
+  push:
+    branches:
+      - main  # This runs the automation script every time you run 'git push' to your main branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Grabs a copy of your codebase
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    # Step 2: Remotely logs into your EC2 instance and runs the update scripts
+    - name: Execute Remote SSH Commands to Deploy
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        port: 22
+        script: |
+          # 1. Check if the project folder exists on EC2. If not, clone it. If yes, pull changes.
+          if [ ! -d "fastapi-ml-app" ]; then
+            git clone https://github.com{{ github.repository }}.git fastapi-ml-app
+            cd fastapi-ml-app
+          else
+            cd fastapi-ml-app
+            git reset --hard HEAD
+            git pull origin main
+          fi
+
+          # 2. Build the new Docker production image from the repository Dockerfile
+          docker build -t fastapi-ml-app .
+
+          # 3. Stop and delete the old container to free up port 80 allocation
+          docker stop ml-api || true
+          docker rm ml-api || true
+
+          # 4. Start the updated app container with an automatic restart crash policy
+          docker run -d --name ml-api -p 80:80 --restart always fastapi-ml-app
